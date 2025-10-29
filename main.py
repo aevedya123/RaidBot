@@ -22,7 +22,7 @@ async def on_ready():
     print(f"[{datetime.now(timezone.utc)}] ✅ Logged in as {client.user}")
     post_links.start()
 
-@tasks.loop(minutes=5)
+@tasks.loop(minutes=1)
 async def post_links():
     try:
         headers = {".ROBLOSECURITY": ROBLOX_COOKIE}
