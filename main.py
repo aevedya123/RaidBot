@@ -1,64 +1,111 @@
 import os
-import discord
-import asyncio
-from discord.ext import tasks
-from datetime import datetime, timezone
-import requests
 import re
+import discord
+import aiohttp
+import asyncio
+from datetime import datetime, timezone
+from discord import Embed
+from flask import Flask
+import threading
+import types
+import sys
 
+# Prevent audioop import error on Python 3.13
+sys.modules["audioop"] = types.SimpleNamespace()
+
+# --- Environment Variables ---
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 ROBLOX_COOKIE = os.getenv("ROBLOX_COOKIE")
 SERVER_ID = os.getenv("SERVER_ID")
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
+# --- Flask Keep-Alive Webserver ---
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "✅ Bot is alive and running!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
+
+threading.Thread(target=run_flask).start()
+
+# --- Discord Bot Setup ---
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
-# store already seen links to prevent duplicates
-seen_links = set()
+# Track last seen post to avoid duplicates
+last_post_id = None
+
+async def fetch_group_posts():
+    """Fetch recent posts from the Roblox group wall."""
+    headers = {"Cookie": f".ROBLOSECURITY={ROBLOX_COOKIE}"}
+    url = f"https://groups.roblox.com/v2/groups/{SERVER_ID}/wall/posts?limit=30&sortOrder=Desc"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as resp:
+            if resp.status != 200:
+                print(f"[{datetime.now(timezone.utc)}] Roblox API error: {resp.status}")
+                return []
+            data = await resp.json()
+            return data.get("data", [])
+
+def extract_links(text):
+    """Extract Roblox share links from text."""
+    return re.findall(r"https?://www\.roblox\.com/share\?code=[A-Za-z0-9]+&type=Server", text)
+
+async def send_links_to_discord(links):
+    """Send extracted links to Discord as embeds."""
+    channel = client.get_channel(CHANNEL_ID)
+    if not channel:
+        print("⚠️ Channel not found. Check CHANNEL_ID.")
+        return
+
+    for link in links:
+        embed = Embed(
+            title="🕹️ Private Server Link Found",
+            description=f"[Join Server]({link})",
+            color=discord.Color.blurple(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        embed.set_footer(text="Made by SAB-RS")
+        await channel.send(embed=embed)
+        await asyncio.sleep(2)  # space out messages to avoid rate limits
 
 @client.event
 async def on_ready():
+    global last_post_id
     print(f"[{datetime.now(timezone.utc)}] ✅ Logged in as {client.user}")
-    post_links.start()
 
-@tasks.loop(minutes=1)
-async def post_links():
-    try:
-        headers = {".ROBLOSECURITY": ROBLOX_COOKIE}
-        resp = requests.get(f"https://groups.roblox.com/v1/groups/{SERVER_ID}/wall/posts", headers=headers)
+    while True:
+        try:
+            posts = await fetch_group_posts()
+            if not posts:
+                await asyncio.sleep(60)
+                continue
 
-        if resp.status_code != 200:
-            print(f"[{datetime.now(timezone.utc)}] Roblox API error: {resp.status_code}")
-            return
+            new_links = []
+            for post in posts:
+                if last_post_id and post["id"] <= last_post_id:
+                    continue
+                links = extract_links(post["body"])
+                new_links.extend(links)
 
-        data = resp.json().get("data", [])
-        new_links = []
+            if posts:
+                last_post_id = posts[0]["id"]
 
-        for post in data:
-            content = post.get("body", "")
-            links = re.findall(r'https?://\S+', content)
-            for link in links:
-                if link not in seen_links:
-                    seen_links.add(link)
-                    new_links.append(link)
+            if new_links:
+                print(f"✅ Found {len(new_links)} new link(s)")
+                await send_links_to_discord(new_links)
+            else:
+                print(f"[{datetime.now(timezone.utc)}] No new links found")
 
-        if new_links:
-            channel = client.get_channel(CHANNEL_ID)
-            combined = "\n".join(new_links)
-            embed = discord.Embed(
-                title="🧩 New Roblox Links Found",
-                description=combined,
-                color=0x2F3136,
-                timestamp=datetime.now(timezone.utc)
-            )
-            embed.set_footer(text="Made by SAB-RS")
-            await channel.send(embed=embed)
+        except Exception as e:
+            print(f"⚠️ Error: {e}")
 
-        else:
-            print(f"[{datetime.now(timezone.utc)}] No new links found.")
+        await asyncio.sleep(60)  # check every minute
 
-    except Exception as e:
-        print(f"[{datetime.now(timezone.utc)}] Error: {e}")
 
 client.run(DISCORD_TOKEN)
